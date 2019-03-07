@@ -1,0 +1,116 @@
+// This is a Google Earth Engine script that was created to classify the agricultural landscape of Central Mexico into landuse classes, 
+// specifically, identifying farmlands practicing conservation agriculture
+// The base image layer is "Sentinel-2 MSA: Multispectral Instrument, Level-1C" immage collection. This collection was saved as:
+// var image = ee.Image(sen2
+// The training data was created by classifying the image into 10 classes. These were:
+// water, ca, baresoil, crops, urban, clouds, shadows, forest
+
+// Create the EE image
+  var image = ee.Image(sen2
+// Filter the image by date
+  .filterDate("2019-01-01","2019-01-30")
+// Filter the image by location
+  .filterBounds(guan_ca)
+// Sort by metadata property, cloud cover
+  .sort("CLOUD_COVERAGE_ASSESSMENT")
+// Select the first image from the collection
+  .first());
+  print("Sentinel-2 Guanajuato", image);
+// Define the visualization parameters for the map, bands 4, 3, and 2 are needed for RGB
+    var trueColour = {
+        bands: ["B4", "B3", "B2"],
+        min: 0,
+        max: 3000
+    };
+    // Add image to map
+    Map.addLayer(image, trueColour, "true-colour image");
+// Define false-colour visualization parameters
+    var falseColour = {
+        bands: ["B8", "B4", "B3"],
+        min: 0,
+        max: 3000
+    };
+
+// More work to be done below on importing and integrating the DEM
+// var elevation = dataset.select('elevation');
+// var slope = ee.Terrain.slope(elevation);
+// Map.setCenter(-112.8598, 36.2841, 10);
+// Map.addLayer(slope, {min: 0, max: 60}, 'slope');
+
+// Add the image to the map using the visualization parameters
+    Map.addLayer(image, falseColour, "false-color composite");
+    
+// Calculate NDVI and add layer to map
+// NDVI = (NIR - RED)/(NIR + RED)
+// Define variable NDVI from equation
+    var NDVI = image.expression(
+        "(NIR - RED) / (NIR + RED)",
+        {
+          RED: image.select("B4"),    // RED
+          NIR: image.select("B8"),    // NIR
+          BLUE: image.select("B2")    // BLUE
+        });
+    Map.addLayer(NDVI, {min: 0, max: 1}, "NDVI");
+
+// Create the training data
+    
+var newfc = ca.merge(water).merge(ca).merge(baresoil).merge(crops).merge(urban).merge(clouds).merge(shadows).merge(forest).merge(lightcover);
+
+print(newfc)
+
+var bands = ['B2', 'B3', 'B4', 'B5', 'B6', 'B7', 'B8']; 
+var training = image.select(bands).sampleRegions({
+  collection: newfc,
+  properties: ['landcover'],
+  scale: 30
+});    
+ 
+print(training);
+ 
+// Train the classifier, in this case, I use the Random Forest algorithm
+var classifier = ee.Classifier.randomForest(100)
+  .train({
+          features: training,
+          classProperty: 'landcover',
+          inputProperties: bands
+});
+
+// Run the classification
+var classified = image.select(bands).classify(classifier);
+print(classified);
+
+// Display the classification
+Map.centerObject(newfc, 11);
+Map.addLayer(image, 
+{bands: ['B2', 'B3', 'B4'], max: 0.3}, 
+'Sentinel 2 image');
+Map.addLayer(classified, {min: 0, max: 8, palette: ['126CC6', 'EBEB07', '613D05', '2CBE17', 'B9BFB8', 'FFFFFF', '000000', '076105', 'D47606']}, 
+'classification');
+Map.addLayer(newfc); 
+
+// Error estimation
+var trainAccuracy = classifier.confusionMatrix();
+print('Resubstitution error matrix: ', trainAccuracy);
+print('Training overall accuracy: ', trainAccuracy.accuracy());
+
+var withRandom = training.randomColumn('random');
+
+// We want to reserve some of the data for testing, to avoid overfitting the model.
+var split = 0.7;  // Roughly 70% training, 30% testing.
+var trainingPartition = withRandom.filter(ee.Filter.lt('random', split));
+var testingPartition = withRandom.filter(ee.Filter.gte('random', split));
+
+// Trained with 70% of our data.
+var trainedClassifier = ee.Classifier.randomForest().train({
+  features: trainingPartition,
+  classProperty: 'landcover',
+  inputProperties: bands
+});
+
+// Classify the test FeatureCollection.
+var test = testingPartition.classify(trainedClassifier);
+
+// Print the confusion matrix.
+var confusionMatrix = test.errorMatrix('landcover', 'classification');
+print('RF testing error matrix', confusionMatrix);
+print('RF testing accuraccy', confusionMatrix.accuracy());
